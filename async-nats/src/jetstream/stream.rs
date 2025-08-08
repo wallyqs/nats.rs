@@ -1394,6 +1394,18 @@ pub struct Config {
     #[cfg(feature = "server_2_11")]
     #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_nanos")]
     pub subject_delete_marker_ttl: Option<Duration>,
+
+    /// Allows replicated streams to asynchronously flush.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub allow_async_flush: bool,
+
+    /// Enables message counter CRDTs.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub allow_msg_counter: bool,
+
+    /// Enables atomic batch publishing.
+    #[serde(default, skip_serializing_if = "is_default", rename = "allow_atomic")]
+    pub allow_atomic_publish: bool,
 }
 
 impl From<&Config> for Config {

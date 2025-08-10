@@ -63,9 +63,11 @@ struct ClientResult {
 async fn run_client(
     client_id: usize,
     messages_per_client: usize,
+    outstanding_acks_per_client: usize,
     args: Arc<Args>,
-    semaphore: Arc<Semaphore>,
 ) -> Result<ClientResult, async_nats::Error> {
+    // Create a semaphore for this client
+    let semaphore = Arc::new(Semaphore::new(outstanding_acks_per_client));
     println!("[Client {}] Connecting to {}...", client_id, args.url);
     let client = if let (Some(user), Some(pass)) = (&args.user, &args.pass) {
         async_nats::ConnectOptions::new()
@@ -172,13 +174,14 @@ async fn main() -> Result<(), async_nats::Error> {
     let base_messages_per_client = args.count / args.clients;
     let remainder = args.count % args.clients;
 
-    // Create a semaphore shared across all clients
-    let semaphore = Arc::new(Semaphore::new(args.outstanding_acks));
+    // Calculate outstanding acks per client
+    let outstanding_acks_per_client = args.outstanding_acks / args.clients;
 
     println!("Starting {} client(s)...", args.clients);
     println!("Total messages to publish: {}", args.count);
     println!("Messages per client: ~{}", base_messages_per_client);
-    println!("Total outstanding acks limit: {}", args.outstanding_acks);
+    println!("Outstanding acks per client: {}", outstanding_acks_per_client);
+    println!("Total outstanding acks: {}", outstanding_acks_per_client * args.clients);
     println!();
 
     let start = Instant::now();
@@ -194,9 +197,8 @@ async fn main() -> Result<(), async_nats::Error> {
         };
 
         let args_clone = args.clone();
-        let semaphore_clone = semaphore.clone();
         let task = tokio::spawn(async move {
-            run_client(client_id, messages_for_this_client, args_clone, semaphore_clone).await
+            run_client(client_id, messages_for_this_client, outstanding_acks_per_client, args_clone).await
         });
         client_tasks.push(task);
     }

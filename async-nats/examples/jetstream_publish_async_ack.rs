@@ -62,6 +62,7 @@ struct ClientResult {
 
 async fn run_client(
     client_id: usize,
+    messages_per_client: usize,
     args: Arc<Args>,
     semaphore: Arc<Semaphore>,
 ) -> Result<ClientResult, async_nats::Error> {
@@ -90,7 +91,7 @@ async fn run_client(
 
     println!(
         "[Client {}] Publishing {} messages of {} bytes each",
-        client_id, args.count, args.size
+        client_id, messages_per_client, args.size
     );
 
     // Prepare the message payload
@@ -103,8 +104,8 @@ async fn run_client(
     let publish_start = start;
 
     // Publish all messages without awaiting acks
-    let mut ack_futures = Vec::with_capacity(args.count);
-    for i in 0..args.count {
+    let mut ack_futures = Vec::with_capacity(messages_per_client);
+    for i in 0..messages_per_client {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
         let ack_future = jetstream
@@ -124,7 +125,7 @@ async fn run_client(
     let publish_duration = publish_start.elapsed();
     println!(
         "[Client {}] All {} messages published in {:?}",
-        client_id, args.count, publish_duration
+        client_id, messages_per_client, publish_duration
     );
 
     let ack_start = Instant::now();
@@ -167,11 +168,16 @@ async fn run_client(
 async fn main() -> Result<(), async_nats::Error> {
     let args = Arc::new(Args::parse());
 
+    // Calculate messages per client
+    let base_messages_per_client = args.count / args.clients;
+    let remainder = args.count % args.clients;
+
     // Create a semaphore shared across all clients
     let semaphore = Arc::new(Semaphore::new(args.outstanding_acks));
 
     println!("Starting {} client(s)...", args.clients);
-    println!("Total messages to publish: {} per client", args.count);
+    println!("Total messages to publish: {}", args.count);
+    println!("Messages per client: ~{}", base_messages_per_client);
     println!("Total outstanding acks limit: {}", args.outstanding_acks);
     println!();
 
@@ -180,10 +186,17 @@ async fn main() -> Result<(), async_nats::Error> {
     // Spawn all client tasks
     let mut client_tasks = Vec::with_capacity(args.clients);
     for client_id in 0..args.clients {
+        // Distribute remainder messages among first clients
+        let messages_for_this_client = if client_id < remainder {
+            base_messages_per_client + 1
+        } else {
+            base_messages_per_client
+        };
+
         let args_clone = args.clone();
         let semaphore_clone = semaphore.clone();
         let task = tokio::spawn(async move {
-            run_client(client_id, args_clone, semaphore_clone).await
+            run_client(client_id, messages_for_this_client, args_clone, semaphore_clone).await
         });
         client_tasks.push(task);
     }
@@ -207,11 +220,15 @@ async fn main() -> Result<(), async_nats::Error> {
             }
             Ok(Err(e)) => {
                 eprintln!("Client {} failed: {}", idx, e);
-                total_errors += args.count;
+                // We don't know exactly how many messages this client was supposed to send
+                // but we can estimate based on the total count and number of clients
+                let estimated_messages = args.count / args.clients + if idx < (args.count % args.clients) { 1 } else { 0 };
+                total_errors += estimated_messages;
             }
             Err(e) => {
                 eprintln!("Client {} task failed: {}", idx, e);
-                total_errors += args.count;
+                let estimated_messages = args.count / args.clients + if idx < (args.count % args.clients) { 1 } else { 0 };
+                total_errors += estimated_messages;
             }
         }
     }
@@ -240,8 +257,7 @@ async fn main() -> Result<(), async_nats::Error> {
 
     // Print aggregate results
     println!("=== Aggregate Results ===");
-    let total_messages = args.count * args.clients;
-    println!("Total messages published: {}", total_messages);
+    println!("Total messages published: {}", args.count);
     println!("Total messages acknowledged: {}", total_success);
     if total_errors > 0 {
         println!("Total errors: {}", total_errors);

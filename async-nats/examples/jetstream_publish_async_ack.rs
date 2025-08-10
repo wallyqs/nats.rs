@@ -18,7 +18,7 @@ struct Args {
     size: usize,
 
     /// Subject to publish to
-    #[arg(short, long, default_value = "bench.test", value_delimiter = ',')]
+    #[arg(long, default_value = "bench.test", value_delimiter = ',')]
     subjects: Vec<String>,
 
     /// Stream name
@@ -26,7 +26,7 @@ struct Args {
     stream: String,
 
     /// NATS server URL
-    #[arg(short, long, default_value = "nats://localhost:4222")]
+    #[arg(short = 's', long = "server", default_value = "nats://localhost:4222")]
     url: String,
 
     /// Max outstanding acks
@@ -34,7 +34,7 @@ struct Args {
     outstanding_acks: usize,
 
     /// Whether to create the stream or assert its existence
-    #[arg(long, default_value_t = true, action = ArgAction::Set, value_parser = clap::value_parser!(bool))]
+    #[arg(long, default_value_t = false, action = ArgAction::Set, value_parser = clap::value_parser!(bool))]
     create_stream: bool,
 
     /// Username for NATS authentication

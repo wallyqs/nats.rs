@@ -36,6 +36,14 @@ struct Args {
     /// Whether to create the stream or assert its existence
     #[arg(long, default_value_t = true, action = ArgAction::Set, value_parser = clap::value_parser!(bool))]
     create_stream: bool,
+
+    /// Username for NATS authentication
+    #[arg(long)]
+    user: Option<String>,
+
+    /// Password for NATS authentication
+    #[arg(long)]
+    pass: Option<String>,
 }
 
 #[tokio::main]
@@ -45,7 +53,14 @@ async fn main() -> Result<(), async_nats::Error> {
     let semaphore = Arc::new(Semaphore::new(args.outstanding_acks));
 
     println!("Connecting to {}...", args.url);
-    let client = async_nats::connect(&args.url).await?;
+    let client = if let (Some(user), Some(pass)) = (&args.user, &args.pass) {
+        async_nats::ConnectOptions::new()
+            .user_and_password(user.clone(), pass.clone())
+            .connect(&args.url)
+            .await?
+    } else {
+        async_nats::connect(&args.url).await?
+    };
     let jetstream = jetstream::new(client);
 
     // Create or get the stream

@@ -48,6 +48,10 @@ struct Args {
     /// Number of parallel clients to create
     #[arg(long, default_value_t = 1)]
     clients: usize,
+
+    /// Number of Tokio worker threads (defaults to number of CPU cores)
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -166,9 +170,29 @@ async fn run_client(
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<(), async_nats::Error> {
-    let args = Arc::new(Args::parse());
+fn main() -> Result<(), async_nats::Error> {
+    let args = Args::parse();
+
+    // Build the runtime with the specified number of threads
+    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+    runtime_builder.enable_all();
+    
+    if let Some(threads) = args.threads {
+        runtime_builder.worker_threads(threads);
+        println!("Using {} worker threads", threads);
+    } else {
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        println!("Using {} worker threads (default, based on CPU cores)", num_cpus);
+    }
+
+    let runtime = runtime_builder.build().expect("Failed to build Tokio runtime");
+    
+    runtime.block_on(async_main(Arc::new(args)))
+}
+
+async fn async_main(args: Arc<Args>) -> Result<(), async_nats::Error> {
 
     // Calculate messages per client
     let base_messages_per_client = args.count / args.clients;

@@ -28,7 +28,7 @@ struct Args {
     #[arg(short = 's', long = "server", default_value = "nats://localhost:4222")]
     url: String,
 
-    /// Max outstanding acks per process
+    /// Max outstanding acks per client
     #[arg(long, alias = "batch", default_value_t = 10000)]
     outstanding_acks: usize,
 

@@ -69,6 +69,10 @@ struct Args {
     /// Synchronized start delay in milliseconds before publishing begins
     #[arg(long, default_value_t = 250)]
     start_delay_ms: u64,
+
+    /// Maximum number of blocking threads in the runtime thread pool
+    #[arg(long, default_value_t = 512)]
+    max_blocking_threads: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Configuration:");
     println!("  Total runtimes: {}", args.runtimes);
     println!("  Worker threads per runtime: {}", threads_per_runtime);
+    println!("  Max blocking threads per runtime: {}", args.max_blocking_threads);
     println!("  Total clients: {}", args.clients);
     println!("  Clients per runtime: ~{}", base_clients_per_runtime);
     println!("  Total messages: {}", args.count);
@@ -307,6 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Build a new runtime for this thread
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(threads_per_runtime)
+                .max_blocking_threads(args_clone.max_blocking_threads)
                 .enable_all()
                 .build()
                 .expect("Failed to build Tokio runtime");

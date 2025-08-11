@@ -379,12 +379,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Total time: {:?}", result.total_duration);
             
             let client_rate = result.success_count as f64 / result.total_duration.as_secs_f64();
-            let client_throughput = (result.success_count * args.size) as f64
+            let client_throughput_mb = (result.success_count * args.size) as f64
                 / result.total_duration.as_secs_f64()
                 / 1024.0
                 / 1024.0;
+            let client_throughput_gb = client_throughput_mb / 1024.0;
+            let client_throughput_gbps = client_throughput_gb * 8.0;
             println!("  Message rate: {:.0} msgs/sec", client_rate);
-            println!("  Throughput: {:.2} MB/sec", client_throughput);
+            println!("  Throughput: {:.2} MB/sec ({:.3} Gbps)", client_throughput_mb, client_throughput_gbps);
             println!();
         }
     }
@@ -422,12 +424,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Total time: {:?}", total_elapsed);
     
     let aggregate_rate = total_success as f64 / total_elapsed.as_secs_f64();
-    let aggregate_throughput =
+    let aggregate_throughput_mb =
         (total_success * args.size) as f64 / total_elapsed.as_secs_f64() / 1024.0 / 1024.0;
+    let aggregate_throughput_gb = aggregate_throughput_mb / 1024.0;
+    let aggregate_throughput_gbps = aggregate_throughput_gb * 8.0; // Convert GB/s to Gbps
     
     println!("\nAggregate Performance:");
     println!("  Message rate: {:.0} msgs/sec", aggregate_rate);
-    println!("  Throughput: {:.2} MB/sec", aggregate_throughput);
+    println!("  Throughput: {:.2} MB/sec ({:.3} GB/sec, {:.3} Gbps)", 
+             aggregate_throughput_mb, aggregate_throughput_gb, aggregate_throughput_gbps);
     if total_success > 0 {
         println!(
             "  Avg latency: {:.2} ms/msg",

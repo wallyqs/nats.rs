@@ -1,6 +1,7 @@
 use async_nats::jetstream::{self, stream};
 use clap::{ArgAction, Parser};
 use futures::future::join_all;
+use rand::Rng;
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,6 +65,14 @@ struct Args {
     /// Enable detailed diagnostic output
     #[arg(long, default_value_t = false)]
     diagnostic: bool,
+
+    /// Maximum connection jitter in milliseconds (0 to disable)
+    #[arg(long, default_value_t = 100)]
+    connection_jitter_ms: u64,
+
+    /// Synchronized start delay in milliseconds before publishing begins
+    #[arg(long, default_value_t = 250)]
+    start_delay_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +100,12 @@ async fn run_client(
     
     // Create a semaphore for this client
     let semaphore = Arc::new(Semaphore::new(outstanding_acks_per_client));
+    
+    // Add random jitter to connection establishment to avoid thundering herd
+    if args.connection_jitter_ms > 0 {
+        let jitter_ms = rand::thread_rng().gen_range(0..=args.connection_jitter_ms);
+        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+    }
     
     if !args.no_progress && args.diagnostic {
         println!("[Runtime {} Client {}] Starting with {} outstanding acks", runtime_id, client_id, outstanding_acks_per_client);
@@ -139,6 +154,15 @@ async fn run_client(
     let payload = vec![b'X'; args.size];
     let subjects = &args.subjects;
     let subjects_len = subjects.len();
+
+    // Synchronized start delay - all clients wait before beginning to publish
+    if args.start_delay_ms > 0 {
+        if !args.no_progress && client_id < 5 {
+            println!("[Runtime {} Client {}] Waiting {}ms before starting to publish...", 
+                runtime_id, client_id, args.start_delay_ms);
+        }
+        tokio::time::sleep(Duration::from_millis(args.start_delay_ms)).await;
+    }
 
     // Start timing
     let publish_start = Instant::now();
@@ -285,6 +309,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Total outstanding acks: {}", outstanding_acks_per_client * args.clients);
     println!("  Message size: {} bytes", args.size);
     println!("  Total data: {:.2} MB", (args.count * args.size) as f64 / 1024.0 / 1024.0);
+    println!("  Connection jitter: {}ms max", args.connection_jitter_ms);
+    println!("  Start delay: {}ms", args.start_delay_ms);
     
     if outstanding_acks_per_client < 10 {
         println!("  ⚠️  WARNING: Outstanding acks per client ({}) is very low!", outstanding_acks_per_client);

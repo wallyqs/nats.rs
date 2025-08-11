@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Number of messages to publish
@@ -49,14 +49,19 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     clients: usize,
 
-    /// Number of Tokio worker threads (defaults to number of CPU cores)
+    /// Number of Tokio worker threads per runtime (defaults to number of CPU cores divided by runtimes)
     #[arg(long)]
     threads: Option<usize>,
+
+    /// Number of independent Tokio runtimes to create (defaults to 1)
+    #[arg(long, default_value_t = 1)]
+    runtimes: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ClientResult {
     client_id: usize,
+    runtime_id: usize,
     success_count: usize,
     error_count: usize,
     publish_duration: Duration,
@@ -66,13 +71,15 @@ struct ClientResult {
 
 async fn run_client(
     client_id: usize,
+    runtime_id: usize,
     messages_per_client: usize,
     outstanding_acks_per_client: usize,
     args: Arc<Args>,
 ) -> Result<ClientResult, async_nats::Error> {
     // Create a semaphore for this client
     let semaphore = Arc::new(Semaphore::new(outstanding_acks_per_client));
-    println!("[Client {}] Connecting to {}...", client_id, args.url);
+    
+    println!("[Runtime {} Client {}] Connecting to {}...", runtime_id, client_id, args.url);
     let client = if let (Some(user), Some(pass)) = (&args.user, &args.pass) {
         async_nats::ConnectOptions::new()
             .user_and_password(user.clone(), pass.clone())
@@ -85,7 +92,7 @@ async fn run_client(
 
     // Only the first client creates the stream
     if client_id == 0 && args.create_stream {
-        println!("[Client {}] Creating stream '{}'", client_id, args.stream);
+        println!("[Runtime {} Client {}] Creating stream '{}'", runtime_id, client_id, args.stream);
         jetstream
             .get_or_create_stream(stream::Config {
                 name: args.stream.clone(),
@@ -96,8 +103,8 @@ async fn run_client(
     }
 
     println!(
-        "[Client {}] Publishing {} messages of {} bytes each",
-        client_id, messages_per_client, args.size
+        "[Runtime {} Client {}] Publishing {} messages of {} bytes each",
+        runtime_id, client_id, messages_per_client, args.size
     );
 
     // Prepare the message payload
@@ -130,8 +137,8 @@ async fn run_client(
 
     let publish_duration = publish_start.elapsed();
     println!(
-        "[Client {}] All {} messages published in {:?}",
-        client_id, messages_per_client, publish_duration
+        "[Runtime {} Client {}] All {} messages published in {:?}",
+        runtime_id, client_id, messages_per_client, publish_duration
     );
 
     let ack_start = Instant::now();
@@ -148,13 +155,13 @@ async fn run_client(
             Ok(Err(e)) => {
                 error_count += 1;
                 if error_count <= 5 {
-                    eprintln!("[Client {}] Ack error: {}", client_id, e);
+                    eprintln!("[Runtime {} Client {}] Ack error: {}", runtime_id, client_id, e);
                 }
             }
             Err(e) => {
                 error_count += 1;
                 if error_count <= 5 {
-                    eprintln!("[Client {}] Task join error: {}", client_id, e);
+                    eprintln!("[Runtime {} Client {}] Task join error: {}", runtime_id, client_id, e);
                 }
             }
         }
@@ -162,6 +169,7 @@ async fn run_client(
 
     Ok(ClientResult {
         client_id,
+        runtime_id,
         success_count,
         error_count,
         publish_duration,
@@ -170,117 +178,187 @@ async fn run_client(
     })
 }
 
-fn main() -> Result<(), async_nats::Error> {
-    let args = Args::parse();
-
-    // Build the runtime with the specified number of threads
-    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
-    runtime_builder.enable_all();
+async fn run_runtime_clients(
+    runtime_id: usize,
+    client_ids: Vec<usize>,
+    messages_per_client: Vec<usize>,
+    outstanding_acks_per_client: usize,
+    args: Arc<Args>,
+) -> Vec<Result<ClientResult, async_nats::Error>> {
+    let mut client_tasks = Vec::new();
     
-    if let Some(threads) = args.threads {
-        runtime_builder.worker_threads(threads);
-        println!("Using {} worker threads", threads);
+    for (idx, &client_id) in client_ids.iter().enumerate() {
+        let messages = messages_per_client[idx];
+        let args_clone = args.clone();
+        
+        let task = tokio::spawn(async move {
+            run_client(client_id, runtime_id, messages, outstanding_acks_per_client, args_clone).await
+        });
+        client_tasks.push(task);
+    }
+    
+    let results = join_all(client_tasks).await;
+    results.into_iter().map(|r| r.unwrap_or_else(|e| Err(async_nats::Error::from(std::io::Error::new(std::io::ErrorKind::Other, e))))).collect()
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let args_arc = Arc::new(args.clone());
+    
+    // Calculate distribution
+    let base_messages_per_client = args.count / args.clients;
+    let remainder = args.count % args.clients;
+    let outstanding_acks_per_client = args.outstanding_acks / args.clients;
+    
+    // Calculate clients per runtime
+    let base_clients_per_runtime = args.clients / args.runtimes;
+    let runtime_remainder = args.clients % args.runtimes;
+    
+    // Determine threads per runtime
+    let threads_per_runtime = if let Some(threads) = args.threads {
+        threads
     } else {
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        println!("Using {} worker threads (default, based on CPU cores)", num_cpus);
-    }
-
-    let runtime = runtime_builder.build().expect("Failed to build Tokio runtime");
+        std::cmp::max(1, num_cpus / args.runtimes)
+    };
     
-    runtime.block_on(async_main(Arc::new(args)))
-}
-
-async fn async_main(args: Arc<Args>) -> Result<(), async_nats::Error> {
-
-    // Calculate messages per client
-    let base_messages_per_client = args.count / args.clients;
-    let remainder = args.count % args.clients;
-
-    // Calculate outstanding acks per client
-    let outstanding_acks_per_client = args.outstanding_acks / args.clients;
-
-    println!("Starting {} client(s)...", args.clients);
-    println!("Total messages to publish: {}", args.count);
-    println!("Messages per client: ~{}", base_messages_per_client);
-    println!("Outstanding acks per client: {}", outstanding_acks_per_client);
-    println!("Total outstanding acks: {}", outstanding_acks_per_client * args.clients);
+    println!("Configuration:");
+    println!("  Total runtimes: {}", args.runtimes);
+    println!("  Worker threads per runtime: {}", threads_per_runtime);
+    println!("  Total clients: {}", args.clients);
+    println!("  Clients per runtime: ~{}", base_clients_per_runtime);
+    println!("  Total messages: {}", args.count);
+    println!("  Messages per client: ~{}", base_messages_per_client);
+    println!("  Outstanding acks per client: {}", outstanding_acks_per_client);
     println!();
-
+    
     let start = Instant::now();
-
-    // Spawn all client tasks
-    let mut client_tasks = Vec::with_capacity(args.clients);
-    for client_id in 0..args.clients {
-        // Distribute remainder messages among first clients
-        let messages_for_this_client = if client_id < remainder {
-            base_messages_per_client + 1
+    
+    // Create and run multiple runtimes in separate threads
+    let mut handles = Vec::new();
+    let mut client_offset = 0;
+    
+    for runtime_id in 0..args.runtimes {
+        // Calculate how many clients this runtime gets
+        let clients_for_runtime = if runtime_id < runtime_remainder {
+            base_clients_per_runtime + 1
         } else {
-            base_messages_per_client
+            base_clients_per_runtime
         };
-
-        let args_clone = args.clone();
-        let task = tokio::spawn(async move {
-            run_client(client_id, messages_for_this_client, outstanding_acks_per_client, args_clone).await
+        
+        // Assign client IDs for this runtime
+        let client_ids: Vec<usize> = (client_offset..client_offset + clients_for_runtime).collect();
+        client_offset += clients_for_runtime;
+        
+        // Calculate messages for each client in this runtime
+        let messages_per_client: Vec<usize> = client_ids.iter().map(|&id| {
+            if id < remainder {
+                base_messages_per_client + 1
+            } else {
+                base_messages_per_client
+            }
+        }).collect();
+        
+        let args_clone = args_arc.clone();
+        
+        // Spawn a thread for each runtime
+        let handle = std::thread::spawn(move || {
+            // Build a new runtime for this thread
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(threads_per_runtime)
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime");
+            
+            // Run the clients in this runtime
+            runtime.block_on(run_runtime_clients(
+                runtime_id,
+                client_ids,
+                messages_per_client,
+                outstanding_acks_per_client,
+                args_clone,
+            ))
         });
-        client_tasks.push(task);
+        
+        handles.push(handle);
     }
-
-    // Wait for all clients to complete
-    let results = join_all(client_tasks).await;
-
+    
+    // Wait for all runtimes to complete
+    let mut all_results = Vec::new();
+    for (runtime_id, handle) in handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(runtime_results) => {
+                for result in runtime_results {
+                    match result {
+                        Ok(client_result) => all_results.push(client_result),
+                        Err(e) => eprintln!("Runtime {} client error: {}", runtime_id, e),
+                    }
+                }
+            }
+            Err(e) => eprintln!("Runtime {} thread panic: {:?}", runtime_id, e),
+        }
+    }
+    
     let total_elapsed = start.elapsed();
-
+    
     // Aggregate results
     let mut total_success = 0;
     let mut total_errors = 0;
-    let mut all_results = Vec::new();
-
-    for (idx, result) in results.into_iter().enumerate() {
-        match result {
-            Ok(Ok(client_result)) => {
-                total_success += client_result.success_count;
-                total_errors += client_result.error_count;
-                all_results.push(client_result);
+    
+    for result in &all_results {
+        total_success += result.success_count;
+        total_errors += result.error_count;
+    }
+    
+    // Print per-client results (optional, can be verbose)
+    if args.clients <= 10 {
+        println!("\n=== Per-Client Results ===");
+        for result in &all_results {
+            println!("Runtime {} Client {}:", result.runtime_id, result.client_id);
+            println!("  Messages acknowledged: {}", result.success_count);
+            if result.error_count > 0 {
+                println!("  Errors: {}", result.error_count);
             }
-            Ok(Err(e)) => {
-                eprintln!("Client {} failed: {}", idx, e);
-                // We don't know exactly how many messages this client was supposed to send
-                // but we can estimate based on the total count and number of clients
-                let estimated_messages = args.count / args.clients + if idx < (args.count % args.clients) { 1 } else { 0 };
-                total_errors += estimated_messages;
-            }
-            Err(e) => {
-                eprintln!("Client {} task failed: {}", idx, e);
-                let estimated_messages = args.count / args.clients + if idx < (args.count % args.clients) { 1 } else { 0 };
-                total_errors += estimated_messages;
-            }
+            println!("  Publish time: {:?}", result.publish_duration);
+            println!("  Ack wait time: {:?}", result.ack_duration);
+            println!("  Total time: {:?}", result.total_duration);
+            
+            let client_rate = result.success_count as f64 / result.total_duration.as_secs_f64();
+            let client_throughput = (result.success_count * args.size) as f64
+                / result.total_duration.as_secs_f64()
+                / 1024.0
+                / 1024.0;
+            println!("  Message rate: {:.0} msgs/sec", client_rate);
+            println!("  Throughput: {:.2} MB/sec", client_throughput);
+            println!();
         }
     }
-
-    // Print individual client results
-    println!("\n=== Per-Client Results ===");
-    for result in &all_results {
-        println!("Client {}:", result.client_id);
-        println!("  Messages acknowledged: {}", result.success_count);
-        if result.error_count > 0 {
-            println!("  Errors: {}", result.error_count);
+    
+    // Print per-runtime summary
+    if args.runtimes > 1 {
+        println!("=== Per-Runtime Summary ===");
+        for runtime_id in 0..args.runtimes {
+            let runtime_results: Vec<&ClientResult> = all_results.iter()
+                .filter(|r| r.runtime_id == runtime_id)
+                .collect();
+            
+            if !runtime_results.is_empty() {
+                let runtime_success: usize = runtime_results.iter().map(|r| r.success_count).sum();
+                let runtime_errors: usize = runtime_results.iter().map(|r| r.error_count).sum();
+                
+                println!("Runtime {}:", runtime_id);
+                println!("  Clients: {}", runtime_results.len());
+                println!("  Messages acknowledged: {}", runtime_success);
+                if runtime_errors > 0 {
+                    println!("  Errors: {}", runtime_errors);
+                }
+            }
         }
-        println!("  Publish time: {:?}", result.publish_duration);
-        println!("  Ack wait time: {:?}", result.ack_duration);
-        println!("  Total time: {:?}", result.total_duration);
-
-        let client_rate = result.success_count as f64 / result.total_duration.as_secs_f64();
-        let client_throughput = (result.success_count * args.size) as f64
-            / result.total_duration.as_secs_f64()
-            / 1024.0
-            / 1024.0;
-        println!("  Message rate: {:.0} msgs/sec", client_rate);
-        println!("  Throughput: {:.2} MB/sec", client_throughput);
         println!();
     }
-
+    
     // Print aggregate results
     println!("=== Aggregate Results ===");
     println!("Total messages published: {}", args.count);
@@ -289,20 +367,20 @@ async fn async_main(args: Arc<Args>) -> Result<(), async_nats::Error> {
         println!("Total errors: {}", total_errors);
     }
     println!("Total time: {:?}", total_elapsed);
-
+    
     let aggregate_rate = total_success as f64 / total_elapsed.as_secs_f64();
     let aggregate_throughput =
         (total_success * args.size) as f64 / total_elapsed.as_secs_f64() / 1024.0 / 1024.0;
-
+    
     println!("\nAggregate Performance:");
     println!("  Message rate: {:.0} msgs/sec", aggregate_rate);
     println!("  Throughput: {:.2} MB/sec", aggregate_throughput);
-    if args.clients > 0 {
+    if total_success > 0 {
         println!(
             "  Avg latency: {:.2} ms/msg",
             total_elapsed.as_millis() as f64 / total_success as f64
         );
     }
-
+    
     Ok(())
 }

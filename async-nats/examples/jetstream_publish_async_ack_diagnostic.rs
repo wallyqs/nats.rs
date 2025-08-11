@@ -51,7 +51,7 @@ struct Args {
     clients: usize,
 
     /// Number of Tokio worker threads per runtime (defaults to number of CPU cores divided by runtimes)
-    #[arg(long)]
+    #[arg(long, alias = "workers")]
     threads: Option<usize>,
 
     /// Number of independent Tokio runtimes to create (defaults to 1)

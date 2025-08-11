@@ -10,7 +10,7 @@ use tokio::sync::Semaphore;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Number of messages to publish
-    #[arg(short, long, default_value_t = 10000)]
+    #[arg(short, long, alias = "msgs", default_value_t = 10000)]
     count: usize,
 
     /// Size of each message in bytes

@@ -56,6 +56,10 @@ struct Args {
     /// Number of independent Tokio runtimes to create (defaults to 1)
     #[arg(long, default_value_t = 1)]
     runtimes: usize,
+
+    /// Suppress progress output, only show configuration and final results
+    #[arg(long, default_value_t = false)]
+    no_progress: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +83,9 @@ async fn run_client(
     // Create a semaphore for this client
     let semaphore = Arc::new(Semaphore::new(outstanding_acks_per_client));
     
-    println!("[Runtime {} Client {}] Connecting to {}...", runtime_id, client_id, args.url);
+    if !args.no_progress {
+        println!("[Runtime {} Client {}] Connecting to {}...", runtime_id, client_id, args.url);
+    }
     let client = if let (Some(user), Some(pass)) = (&args.user, &args.pass) {
         async_nats::ConnectOptions::new()
             .user_and_password(user.clone(), pass.clone())
@@ -92,7 +98,9 @@ async fn run_client(
 
     // Only the first client creates the stream
     if client_id == 0 && args.create_stream {
-        println!("[Runtime {} Client {}] Creating stream '{}'", runtime_id, client_id, args.stream);
+        if !args.no_progress {
+            println!("[Runtime {} Client {}] Creating stream '{}'", runtime_id, client_id, args.stream);
+        }
         jetstream
             .get_or_create_stream(stream::Config {
                 name: args.stream.clone(),
@@ -102,10 +110,12 @@ async fn run_client(
             .await?;
     }
 
-    println!(
-        "[Runtime {} Client {}] Publishing {} messages of {} bytes each",
-        runtime_id, client_id, messages_per_client, args.size
-    );
+    if !args.no_progress {
+        println!(
+            "[Runtime {} Client {}] Publishing {} messages of {} bytes each",
+            runtime_id, client_id, messages_per_client, args.size
+        );
+    }
 
     // Prepare the message payload
     let payload = vec![b'X'; args.size];
@@ -136,10 +146,12 @@ async fn run_client(
     }
 
     let publish_duration = publish_start.elapsed();
-    println!(
-        "[Runtime {} Client {}] All {} messages published in {:?}",
-        runtime_id, client_id, messages_per_client, publish_duration
-    );
+    if !args.no_progress {
+        println!(
+            "[Runtime {} Client {}] All {} messages published in {:?}",
+            runtime_id, client_id, messages_per_client, publish_duration
+        );
+    }
 
     let ack_start = Instant::now();
     let results = join_all(ack_futures).await;
@@ -154,13 +166,13 @@ async fn run_client(
             Ok(Ok(_)) => success_count += 1,
             Ok(Err(e)) => {
                 error_count += 1;
-                if error_count <= 5 {
+                if error_count <= 5 && !args.no_progress {
                     eprintln!("[Runtime {} Client {}] Ack error: {}", runtime_id, client_id, e);
                 }
             }
             Err(e) => {
                 error_count += 1;
-                if error_count <= 5 {
+                if error_count <= 5 && !args.no_progress {
                     eprintln!("[Runtime {} Client {}] Task join error: {}", runtime_id, client_id, e);
                 }
             }
@@ -293,11 +305,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for result in runtime_results {
                     match result {
                         Ok(client_result) => all_results.push(client_result),
-                        Err(e) => eprintln!("Runtime {} client error: {}", runtime_id, e),
+                        Err(e) => {
+                            if !args.no_progress {
+                                eprintln!("Runtime {} client error: {}", runtime_id, e);
+                            }
+                        }
                     }
                 }
             }
-            Err(e) => eprintln!("Runtime {} thread panic: {:?}", runtime_id, e),
+            Err(e) => {
+                if !args.no_progress {
+                    eprintln!("Runtime {} thread panic: {:?}", runtime_id, e);
+                }
+            }
         }
     }
     
@@ -313,7 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Print per-client results (optional, can be verbose)
-    if args.clients <= 10 {
+    if args.clients <= 10 && !args.no_progress {
         println!("\n=== Per-Client Results ===");
         for result in &all_results {
             println!("Runtime {} Client {}:", result.runtime_id, result.client_id);
@@ -337,7 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Print per-runtime summary
-    if args.runtimes > 1 {
+    if args.runtimes > 1 && !args.no_progress {
         println!("=== Per-Runtime Summary ===");
         for runtime_id in 0..args.runtimes {
             let runtime_results: Vec<&ClientResult> = all_results.iter()

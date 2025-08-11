@@ -63,6 +63,10 @@ struct Args {
     /// Suppress progress output
     #[arg(long, default_value_t = false)]
     no_progress: bool,
+
+    /// Include Nats-Sent-At header with Unix timestamp in nanoseconds
+    #[arg(long, default_value_t = false)]
+    sent_at: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -225,6 +229,10 @@ fn build_command_args(cmd: &mut Command, args: &Args, messages: usize, process_i
     
     if args.no_progress {
         cmd.arg("--no-progress");
+    }
+    
+    if args.sent_at {
+        cmd.arg("--sent-at");
     }
 }
 

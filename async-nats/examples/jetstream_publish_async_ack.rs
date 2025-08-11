@@ -1,10 +1,11 @@
 use async_nats::jetstream::{self, stream};
+use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use clap::{ArgAction, Parser};
 use futures::future::join_all;
 use rand::Rng;
 use std::future::IntoFuture;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 #[derive(Parser, Debug, Clone)]
@@ -73,6 +74,10 @@ struct Args {
     /// Maximum number of blocking threads in the runtime thread pool
     #[arg(long, default_value_t = 512)]
     max_blocking_threads: usize,
+
+    /// Include Nats-Sent-At header with Unix timestamp in nanoseconds
+    #[arg(long, default_value_t = false)]
+    sent_at: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -159,9 +164,31 @@ async fn run_client(
     for i in 0..messages_per_client {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-        let ack_future = jetstream
-            .publish(subjects[i % subjects_len].clone(), payload.clone().into())
-            .await?;
+        let ack_future = if args.sent_at {
+            // Create headers with Nats-Sent-At timestamp
+            let mut headers = HeaderMap::new();
+            let timestamp_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            
+            headers.insert(
+                HeaderName::from_static("Nats-Sent-At"),
+                HeaderValue::from(timestamp_ns.to_string())
+            );
+            
+            jetstream
+                .publish_with_headers(
+                    subjects[i % subjects_len].clone(), 
+                    headers,
+                    payload.clone().into()
+                )
+                .await?
+        } else {
+            jetstream
+                .publish(subjects[i % subjects_len].clone(), payload.clone().into())
+                .await?
+        };
 
         // Spawn a task to release the permit when ack completes
         let ack_with_permit = tokio::spawn(async move {

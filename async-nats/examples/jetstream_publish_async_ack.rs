@@ -30,7 +30,7 @@ struct Args {
     url: String,
 
     /// Max outstanding acks
-    #[arg(long, default_value_t = 10000)]
+    #[arg(long, alias = "batch", default_value_t = 10000)]
     outstanding_acks: usize,
 
     /// Whether to create the stream or assert its existence

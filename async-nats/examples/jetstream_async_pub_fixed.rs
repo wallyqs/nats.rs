@@ -7,7 +7,7 @@ use std::time::Instant;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Number of messages to publish
-    #[arg(short, long, default_value_t = 10000)]
+    #[arg(short, long, alias = "msgs", default_value_t = 10000)]
     count: usize,
 
     /// Size of each message in bytes
@@ -15,7 +15,7 @@ struct Args {
     size: usize,
 
     /// Subject to publish to
-    #[arg(short, long, default_value = "bench.test", value_delimiter = ',')]
+    #[arg(long, default_value = "bench.test", value_delimiter = ',')]
     subjects: Vec<String>,
 
     /// Stream name
@@ -23,11 +23,11 @@ struct Args {
     stream: String,
 
     /// NATS server URL
-    #[arg(short, long, default_value = "nats://localhost:4222")]
+    #[arg(short = 'u', long, alias = "server", short_alias = 's', default_value = "nats://localhost:4222")]
     url: String,
 
     /// Max outstanding acks
-    #[arg(long, default_value_t = 10000)]
+    #[arg(long, alias = "batch", default_value_t = 10000)]
     outstanding_acks: usize,
 
     /// Enable backpressure mode (wait when max inflight is reached instead of erroring)
@@ -45,6 +45,18 @@ struct Args {
     /// Delete streams
     #[arg(long, default_value_t = false, action = ArgAction::Set, value_parser = clap::value_parser!(bool))]
     delete_streams: bool,
+
+    /// Username for authentication
+    #[arg(long)]
+    user: Option<String>,
+
+    /// Password for authentication
+    #[arg(long)]
+    pass: Option<String>,
+
+    /// Skip checking/creating the stream
+    #[arg(long, default_value_t = false)]
+    skip_stream: bool,
 }
 
 #[tokio::main]
@@ -55,7 +67,14 @@ async fn main() -> Result<(), async_nats::Error> {
 
     if args.delete_streams {
         // Delete existing streams if requested
-        let client = async_nats::connect(&args.url).await?;
+        let client = if let (Some(user), Some(pass)) = (&args.user, &args.pass) {
+            async_nats::ConnectOptions::new()
+                .user_and_password(user.clone(), pass.clone())
+                .connect(&args.url)
+                .await?
+        } else {
+            async_nats::connect(&args.url).await?
+        };
         let jetstream = jetstream::new(client);
         for subject in &args.subjects {
             println!("Deleting stream '{}'", subject);
@@ -66,21 +85,32 @@ async fn main() -> Result<(), async_nats::Error> {
         }
     }
     // Create the stream first using a single connection
-    if args.create_stream {
-        for subject in &args.subjects {
-            let setup_client = async_nats::connect(&args.url).await?;
-            let setup_jetstream = jetstream::new(setup_client);
-            println!("Creating stream '{}'", subject);
-            setup_jetstream
-                .get_or_create_stream(stream::Config {
-                    name: subject.clone(),
-                    subjects: vec![subject.clone()],
-                    ..Default::default()
-                })
-                .await?;
+    if !args.skip_stream {
+        if args.create_stream {
+            for subject in &args.subjects {
+                let setup_client = if let (Some(user), Some(pass)) = (&args.user, &args.pass) {
+                    async_nats::ConnectOptions::new()
+                        .user_and_password(user.clone(), pass.clone())
+                        .connect(&args.url)
+                        .await?
+                } else {
+                    async_nats::connect(&args.url).await?
+                };
+                let setup_jetstream = jetstream::new(setup_client);
+                println!("Creating stream '{}'", subject);
+                setup_jetstream
+                    .get_or_create_stream(stream::Config {
+                        name: subject.clone(),
+                        subjects: vec![subject.clone()],
+                        ..Default::default()
+                    })
+                    .await?;
+            }
+        } else {
+            println!("Ensuring stream '{}' exists", args.stream);
         }
     } else {
-        println!("Ensuring stream '{}' exists", args.stream);
+        println!("Skipping stream creation/check as requested");
     }
 
     println!(
@@ -154,15 +184,20 @@ async fn main() -> Result<(), async_nats::Error> {
         let tx = tx.clone();
         let payload = payload.clone();
         let subjects = subjects.clone();
+        let user = args.user.clone();
+        let pass = args.pass.clone();
 
         let task = tokio::spawn(async move {
             // Each client gets its own connection
-            let client = async_nats::ConnectOptions::new()
+            let mut connect_options = async_nats::ConnectOptions::new()
                 .client_capacity(outstanding_acks * 2)
-                .subscription_capacity(outstanding_acks * 2)
-                .connect(&url)
-                .await
-                .unwrap();
+                .subscription_capacity(outstanding_acks * 2);
+            
+            if let (Some(user), Some(pass)) = (user, pass) {
+                connect_options = connect_options.user_and_password(user, pass);
+            }
+            
+            let client = connect_options.connect(&url).await.unwrap();
 
             let jetstream = jetstream::context::ContextBuilder::new()
                 .max_ack_inflight(outstanding_acks)
@@ -218,10 +253,11 @@ async fn main() -> Result<(), async_nats::Error> {
     let publish_rate = args.count as f64 / publish_duration.as_secs_f64();
     let publish_throughput =
         (args.count * args.size) as f64 / publish_duration.as_secs_f64() / 1024.0 / 1024.0;
+    let publish_gbps = (args.count * args.size * 8) as f64 / publish_duration.as_secs_f64() / 1_000_000_000.0;
 
     println!(
-        "Publish rate: {:.0} msgs/sec, {:.2} MB/sec",
-        publish_rate, publish_throughput
+        "Publish rate: {:.0} msgs/sec, {:.2} MB/sec, {:.3} Gbps",
+        publish_rate, publish_throughput, publish_gbps
     );
 
     println!("\nAwaiting acknowledgments...");
@@ -264,10 +300,11 @@ async fn main() -> Result<(), async_nats::Error> {
     let total_rate = args.count as f64 / total_duration.as_secs_f64();
     let total_throughput =
         (args.count * args.size) as f64 / total_duration.as_secs_f64() / 1024.0 / 1024.0;
+    let total_gbps = (args.count * args.size * 8) as f64 / total_duration.as_secs_f64() / 1_000_000_000.0;
 
     println!("\nEnd-to-end Performance:");
     println!("  Message rate:     {:.0} msgs/sec", total_rate);
-    println!("  Throughput:       {:.2} MB/sec", total_throughput);
+    println!("  Throughput:       {:.2} MB/sec, {:.3} Gbps", total_throughput, total_gbps);
     println!(
         "  Avg latency:      {:.2} ms/msg",
         total_duration.as_millis() as f64 / args.count as f64

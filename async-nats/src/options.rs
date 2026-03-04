@@ -20,6 +20,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::engine::Engine;
 use futures_util::Future;
 use std::fmt::Formatter;
+use std::net::IpAddr;
 use std::{fmt, path::PathBuf, pin::Pin, time::Duration};
 #[cfg(feature = "nkeys")]
 use std::{path::Path, sync::Arc};
@@ -64,6 +65,7 @@ pub struct ConnectOptions {
     pub(crate) read_buffer_capacity: u16,
     pub(crate) reconnect_delay_callback: Box<dyn Fn(usize) -> Duration + Send + Sync + 'static>,
     pub(crate) auth_callback: Option<CallbackArg1<Vec<u8>, Result<Auth, AuthError>>>,
+    pub(crate) local_address: Option<IpAddr>,
 }
 
 impl fmt::Debug for ConnectOptions {
@@ -116,6 +118,7 @@ impl Default for ConnectOptions {
             }),
             auth: Default::default(),
             auth_callback: None,
+            local_address: None,
         }
     }
 }
@@ -922,6 +925,29 @@ impl ConnectOptions {
     /// ```
     pub fn read_buffer_capacity(mut self, size: u16) -> ConnectOptions {
         self.read_buffer_capacity = size;
+        self
+    }
+
+    /// Sets the local IP address that the client will bind to when connecting
+    /// to the server. This is useful when the client machine has multiple
+    /// network interfaces and you want to control which one is used.
+    ///
+    /// The port is automatically assigned by the operating system.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), async_nats::ConnectError> {
+    /// let ip: std::net::IpAddr = "192.168.1.10".parse().unwrap();
+    /// async_nats::ConnectOptions::new()
+    ///     .local_address(ip)
+    ///     .connect("demo.nats.io")
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn local_address(mut self, address: IpAddr) -> ConnectOptions {
+        self.local_address = Some(address);
         self
     }
 }

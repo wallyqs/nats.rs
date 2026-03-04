@@ -43,12 +43,13 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::cmp;
 use std::io;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::net::TcpSocket;
 use tokio::time::sleep;
 use tokio_rustls::rustls;
 
@@ -69,6 +70,7 @@ pub(crate) struct ConnectorOptions {
     pub(crate) reconnect_delay_callback: Box<dyn Fn(usize) -> Duration + Send + Sync + 'static>,
     pub(crate) auth_callback: Option<CallbackArg1<Vec<u8>, Result<Auth, AuthError>>>,
     pub(crate) max_reconnects: Option<usize>,
+    pub(crate) local_address: Option<IpAddr>,
 }
 
 /// Maintains a list of servers and establishes connections.
@@ -427,9 +429,20 @@ impl Connector {
                 Connection::new(Box::new(con), 0, self.connect_stats.clone())
             }
             _ => {
+                let socket = if socket_addr.is_ipv4() {
+                    TcpSocket::new_v4()?
+                } else {
+                    TcpSocket::new_v6()?
+                };
+
+                if let Some(local_addr) = self.options.local_address {
+                    let bind_addr = std::net::SocketAddr::new(local_addr, 0);
+                    socket.bind(bind_addr)?;
+                }
+
                 let tcp_stream = tokio::time::timeout(
                     self.options.connection_timeout,
-                    TcpStream::connect(socket_addr),
+                    socket.connect(*socket_addr),
                 )
                 .await
                 .map_err(|_| ConnectError::new(crate::ConnectErrorKind::TimedOut))??;

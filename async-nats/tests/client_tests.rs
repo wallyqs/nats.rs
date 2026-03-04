@@ -1206,4 +1206,19 @@ mod client {
             elapsed
         );
     }
+
+    #[tokio::test]
+    async fn local_address() {
+        let server = nats_server::run_basic_server();
+
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let client = ConnectOptions::new()
+            .local_address(ip)
+            .connect(server.client_url())
+            .await
+            .unwrap();
+
+        client.publish("test", "data".into()).await.unwrap();
+        client.flush().await.unwrap();
+    }
 }

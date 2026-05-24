@@ -117,7 +117,7 @@ impl Server {
         let mut last_err = Error::new(ErrorKind::AddrNotAvailable, "no results");
 
         for addr in addrs {
-            std::thread::sleep(backoff);
+            thread::sleep(backoff);
 
             match self.try_connect_addr(addr, &op) {
                 Ok(result) => return Ok(result),

@@ -238,7 +238,7 @@ impl Outbound {
         subject: &str,
         queue: Option<&str>,
         sid: usize,
-    ) -> std::io::Result<()> {
+    ) -> io::Result<()> {
         self.with_writer(|writer| {
             match queue {
                 Some(q) => write!(writer, "SUB {} {} {}\r\n", subject, q, sid)?,

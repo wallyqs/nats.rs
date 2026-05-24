@@ -176,6 +176,7 @@ impl traits::Publisher for Client {
                 crate::subject::SubjectError::InvalidFormat,
             ));
         }
+        self.check_max_payload(msg.payload.len())?;
         self.sender
             .send(Command::Publish(msg))
             .await
@@ -418,17 +419,7 @@ impl Client {
             .maybe_validate_publish_subject(subject)
             .map_err(|e| PublishError::with_source(PublishErrorKind::InvalidSubject, e))?;
 
-        let max_payload = self.max_payload.load(Ordering::Relaxed);
-        if payload.len() > max_payload {
-            return Err(PublishError::with_source(
-                PublishErrorKind::MaxPayloadExceeded,
-                format!(
-                    "Payload size limit of {} exceeded by message size of {}",
-                    max_payload,
-                    payload.len(),
-                ),
-            ));
-        }
+        self.check_max_payload(payload.len())?;
 
         self.sender
             .send(Command::Publish(OutboundMessage {
@@ -438,6 +429,20 @@ impl Client {
                 headers: None,
             }))
             .await?;
+        Ok(())
+    }
+
+    fn check_max_payload(&self, payload_len: usize) -> Result<(), PublishError> {
+        let max_payload = self.max_payload.load(Ordering::Relaxed);
+        if payload_len > max_payload {
+            return Err(PublishError::with_source(
+                PublishErrorKind::MaxPayloadExceeded,
+                format!(
+                    "Payload size limit of {} exceeded by message size of {}",
+                    max_payload, payload_len,
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -469,6 +474,8 @@ impl Client {
         let subject = self
             .maybe_validate_publish_subject(subject)
             .map_err(|e| PublishError::with_source(PublishErrorKind::InvalidSubject, e))?;
+
+        self.check_max_payload(payload.len())?;
 
         self.sender
             .send(Command::Publish(OutboundMessage {
@@ -509,6 +516,8 @@ impl Client {
         let reply = self
             .maybe_validate_publish_subject(reply)
             .map_err(|e| PublishError::with_source(PublishErrorKind::InvalidSubject, e))?;
+
+        self.check_max_payload(payload.len())?;
 
         self.sender
             .send(Command::Publish(OutboundMessage {
@@ -552,6 +561,8 @@ impl Client {
         let reply = self
             .maybe_validate_publish_subject(reply)
             .map_err(|e| PublishError::with_source(PublishErrorKind::InvalidSubject, e))?;
+
+        self.check_max_payload(payload.len())?;
 
         self.sender
             .send(Command::Publish(OutboundMessage {
@@ -674,6 +685,8 @@ impl Client {
             let payload = request.payload.unwrap_or_default();
             let respond = self.new_inbox().into();
             let headers = request.headers;
+
+            self.check_max_payload(payload.len())?;
 
             self.sender
                 .send(Command::Request {

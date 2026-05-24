@@ -1120,6 +1120,8 @@ mod client {
 
     #[tokio::test]
     async fn publish_payload_size() {
+        use async_nats::client::PublishErrorKind;
+
         let server = nats_server::run_server("tests/configs/max_payload.conf");
 
         let client = async_nats::connect(server.client_url()).await.unwrap();
@@ -1127,14 +1129,61 @@ mod client {
         assert_eq!(client.max_payload(), 1024 * 128);
 
         // this exceeds the small payload limit in server config.
-        let payload = vec![0u8; 1024 * 1024];
+        let oversized: Bytes = vec![0u8; 1024 * 1024].into();
+        let at_limit: Bytes = vec![0u8; 1024 * 128].into();
 
-        client.publish("big", payload.into()).await.unwrap_err();
+        // publish
+        let err = client.publish("big", oversized.clone()).await.unwrap_err();
+        assert_eq!(err.kind(), PublishErrorKind::MaxPayloadExceeded);
         client.publish("small", "data".into()).await.unwrap();
+        client.publish("just_ok", at_limit.clone()).await.unwrap();
+
+        // publish_with_headers
+        let headers = async_nats::HeaderMap::new();
+        let err = client
+            .publish_with_headers("big", headers.clone(), oversized.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), PublishErrorKind::MaxPayloadExceeded);
         client
-            .publish("just_ok", vec![0u8; 1024 * 128].into())
+            .publish_with_headers("just_ok", headers.clone(), at_limit.clone())
             .await
             .unwrap();
+
+        // publish_with_reply
+        let err = client
+            .publish_with_reply("big", "reply", oversized.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), PublishErrorKind::MaxPayloadExceeded);
+        client
+            .publish_with_reply("just_ok", "reply", at_limit.clone())
+            .await
+            .unwrap();
+
+        // publish_with_reply_and_headers
+        let err = client
+            .publish_with_reply_and_headers("big", "reply", headers.clone(), oversized.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), PublishErrorKind::MaxPayloadExceeded);
+        client
+            .publish_with_reply_and_headers("just_ok", "reply", headers.clone(), at_limit.clone())
+            .await
+            .unwrap();
+
+        // request — surfaces as RequestError; ensure it errors before going out.
+        // Use a short request timeout so we fail fast if the check ever stops
+        // working and the publish silently goes through (no responder exists).
+        let request = Request::new()
+            .payload(oversized.clone())
+            .timeout(Some(Duration::from_millis(250)));
+        let err = client.send_request("big", request).await.unwrap_err();
+        // The underlying source should be a PublishError::MaxPayloadExceeded.
+        let src = std::error::Error::source(&err)
+            .and_then(|s| s.downcast_ref::<async_nats::PublishError>())
+            .expect("expected PublishError source on RequestError");
+        assert_eq!(src.kind(), PublishErrorKind::MaxPayloadExceeded);
     }
 
     #[tokio::test]

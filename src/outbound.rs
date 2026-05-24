@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
+    convert::TryFrom,
     io::{self, BufWriter, Error, ErrorKind, Write},
     net::{Shutdown, TcpStream},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use parking_lot::{Condvar, Mutex};
@@ -98,6 +99,10 @@ pub(crate) struct Outbound {
     writer: Mutex<Buffer>,
     updated: Condvar,
     shutting_down: AtomicBool,
+    // Server's advertised maximum payload size in bytes.
+    // `usize::MAX` is used as the "no limit known yet" sentinel so that
+    // publishes attempted before the first INFO is processed are not rejected.
+    max_payload: AtomicUsize,
 }
 
 impl Outbound {
@@ -109,6 +114,27 @@ impl Outbound {
             ))),
             updated: Condvar::new(),
             shutting_down: AtomicBool::new(false),
+            max_payload: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    pub(crate) fn set_max_payload(&self, max_payload: i32) {
+        let limit = usize::try_from(max_payload).unwrap_or(usize::MAX);
+        self.max_payload.store(limit, Ordering::Release);
+    }
+
+    fn check_max_payload(&self, len: usize) -> io::Result<()> {
+        let limit = self.max_payload.load(Ordering::Acquire);
+        if len > limit {
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "message payload size {} exceeds server max_payload {}",
+                    len, limit
+                ),
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -193,6 +219,7 @@ impl Outbound {
         reply: Option<&str>,
         msgb: &[u8],
     ) -> io::Result<()> {
+        self.check_max_payload(msgb.len())?;
         self.with_writer(|writer| {
             if let Some(reply) = reply {
                 write!(writer, "PUB {} {} {}\r\n", subj, reply, msgb.len())?;
@@ -236,6 +263,7 @@ impl Outbound {
     }
 
     pub(crate) fn send_response(&self, subj: &str, msgb: &[u8]) -> io::Result<()> {
+        self.check_max_payload(msgb.len())?;
         self.with_writer(|writer| {
             write!(writer, "PUB {} {}\r\n", subj, msgb.len())?;
             writer.write_all(msgb)?;

@@ -114,6 +114,9 @@ impl Inbound {
                     } else {
                         server.reconnects = 0;
                         self.learned_servers = self.info.learned_servers();
+                        self.shared_state
+                            .outbound
+                            .set_max_payload(self.info.max_payload);
                         break 'outer;
                     }
                 } else {
@@ -150,6 +153,9 @@ impl Inbound {
     fn process_info(&mut self, new_info: ServerInfo) {
         self.info = new_info;
         self.learned_servers = self.info.learned_servers();
+        self.shared_state
+            .outbound
+            .set_max_payload(self.info.max_payload);
     }
 
     fn process_msg(&mut self, msg_args: MsgArgs) -> io::Result<()> {

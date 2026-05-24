@@ -227,13 +227,16 @@ impl SharedState {
             ));
         }
 
+        let outbound = Outbound::new(inbound.get_mut().try_clone()?);
+        outbound.set_max_payload(info.max_payload);
+
         let shared_state = Arc::new(SharedState {
             id: nuid::next(),
             shutting_down: AtomicBool::new(false),
             last_error: RwLock::new(Ok(())),
             subs: RwLock::new(HashMap::new()),
             pongs: Mutex::new(VecDeque::new()),
-            outbound: Outbound::new(inbound.get_mut().try_clone()?),
+            outbound,
             threads: Mutex::new(None),
             options,
         });
